@@ -88,7 +88,7 @@ class ATMSETUP():
 
         read_3d = self.input['atmosphere']['profile'] #huge dictionary with [lat][lon][bundle]
 
-        self.c.nlevel = self.input['atmosphere']['profile'].dims['pressure']
+        self.c.nlevel = self.input['atmosphere']['profile'].sizes['pressure']
         self.c.nlayer = self.c.nlevel - 1  
         ng , nt = self.c.ngangle, self.c.ntangle
 
@@ -111,12 +111,17 @@ class ATMSETUP():
         electrons = False
         for g in range(ng):
             for t in range(nt):
-                ilat = list(read_3d.coords['lat'].values.astype(np.float32)).index(np.float32(latitude[t]))
-                ilon = list(read_3d.coords['lon'].values.astype(np.float32)).index(np.float32(longitude[g]))
+                if 'lat2d' in read_3d.coords:  # For phase curve, use lat2d and lon2d
+                    ilat = list(read_3d.coords['lat2d'].values.astype(np.float32)).index(np.float32(latitude[t]))
+                    ilon = list(read_3d.coords['lon2d'].values.astype(np.float32)).index(np.float32(longitude[g]))
+                else:  # For normal 3D calculations, use lat and lon
+                    ilat = list(read_3d.coords['lat'].values.astype(np.float32)).index(np.float32(latitude[t]))
+                    ilon = list(read_3d.coords['lon'].values.astype(np.float32)).index(np.float32(longitude[g]))
                 #read = read_3d[int(latitude[t])][int(longitude[g])].sort_values('pressure').reset_index(drop=True)
                 read = read_3d.isel(lon=ilon,lat=ilat).to_pandas().reset_index().drop(['lat','lon'],axis=1).sort_values('pressure')
                 if 'phase' in read.keys():
                     read=read.drop('phase',axis=1)
+
                 #on the first pass look through all the molecules, parse out the electrons and 
                 #add warnings for molecules that aren't recognized
                 if first:
@@ -129,8 +134,11 @@ class ATMSETUP():
                             if i == 'e-':
                                 electrons = True
                             else: #don't raise exception, instead add user warning that a column has been automatically skipped
-                                self.add_warnings("Ignoring %s in input file, not recognized molecule" % i)
-                                warnings.warn("Ignoring %s in input file, not a recognized molecule" % i, UserWarning)
+                                #make sure no warnin for new lat/lon keys
+                                if 'lat' not in i:
+                                    if 'lon' not in i:
+                                        self.add_warnings("Ignoring %s in input file, not recognized molecule" % i)
+                                        warnings.warn("Ignoring %s in input file, not a recognized molecule" % i, UserWarning)
                     
                     first = False
                     self.weights = weights 
@@ -330,7 +338,9 @@ class ATMSETUP():
                     el, num = sep
                 #default isotope
                 if iso_num=='main':
-                    iso_num = list(ele[el].isotopes.keys())[0] 
+                    #select the main isotope off according to that with the highest relative abundance
+                    main_iso = np.argmax([ele[el].isotopes[i].abundance for i in ele[el].isotopes.keys()])
+                    iso_num = list(ele[el].isotopes.keys())[main_iso] 
                 totmass += ele[el].isotopes[iso_num].mass*float(num)
 
             weights[i]=totmass
@@ -360,6 +370,7 @@ class ATMSETUP():
     def get_density(self):
         """
         Calculates density of atmospheres used on TP profile: LEVEL
+        units of cm-3
         """
         self.level['den'] = self.level['pressure'] / (self.c.k_b * self.level['temperature']) 
         return
@@ -526,7 +537,7 @@ class ATMSETUP():
             cld_input = self.input['clouds']['profile'] 
             cld_input = cld_input.sortby('wno').sortby('pressure')
             if regrid: cld_input = cld_input.interp(wno = wno)
-            if [i for i in cld_input.dims] != ["pressure","wno","lon", "lat"]:
+            if [i for i in cld_input.sizes] != ["pressure","wno","lon", "lat"]:
                 opd = cld_input['opd'].transpose("pressure","wno","lon", "lat").values
                 g0 = cld_input['g0'].transpose("pressure","wno","lon", "lat").values
                 w0 = cld_input['w0'].transpose("pressure","wno","lon", "lat").values
@@ -618,6 +629,13 @@ class ATMSETUP():
         df['level'] = {}
         df['level']['pressure'] = self.level['pressure']/ self.c.pconv #bars
         df['level']['temperature'] = self.level['temperature']
+        
+        #return the level fluxes if the user requests that particular output
+        if self.get_lvl_flux:
+            if not isinstance(getattr(self,'lvl_output_thermal',None), type(None)):
+                df['level']['thermal_fluxes'] = self.lvl_output_thermal
+            if not isinstance(getattr(self,'lvl_output_reflected',None), type(None)):    
+                df['level']['reflected_fluxes'] = self.lvl_output_reflected
 
         df['latitude'] = self.latitude
         df['longitude'] = self.longitude
@@ -650,6 +668,15 @@ class ATMSETUP():
             x = self.flux_at_top
             df['thermal_unit'] = 'erg/cm2/s/cm'
             df['thermal_3d'] = x
+        except:
+            pass
+
+        try: 
+            x = self.flux_layers
+            df['layer']['flux_minus'] = self.flux_layers[0]
+            df['layer']['flux_plus'] = self.flux_layers[1]
+            df['layer']['flux_minus_mdpt'] = self.flux_layers[2]
+            df['layer']['flux_plus_mdpt'] = self.flux_layers[3]
         except:
             pass
 
